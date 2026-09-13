@@ -8,6 +8,8 @@
 
 #[path = "bundle_review.rs"]
 mod bundle_review;
+#[path = "rebase_apply.rs"]
+mod rebase_apply;
 pub(super) use bundle_review::BundleInspectionRefusal;
 
 use super::{NodeWorkspaceRefusal, workspace_request_live};
@@ -50,6 +52,13 @@ impl<'a> CandidateEnvelope<'a> {
     }
 
     fn parse_bounded(input: &'a [u8], maximum_prerequisites: usize) -> Result<Self, NodeWorkspaceRefusal> {
+        Self::parse_profile(input, maximum_prerequisites, false)
+    }
+
+    // Only the explicit rebase profile accepts an entirely dropped series
+    // whose advertised tip is exactly its one prerequisite. Workspace/merge
+    // profiles retain their original, stricter envelope contract.
+    fn parse_profile(input: &'a [u8], maximum_prerequisites: usize, allow_prerequisite_tip: bool) -> Result<Self, NodeWorkspaceRefusal> {
         if maximum_prerequisites == 0 || maximum_prerequisites > MAX_PREREQUISITES {
             return Err(invalid("invalid bundle prerequisite limit"));
         }
@@ -94,7 +103,7 @@ impl<'a> CandidateEnvelope<'a> {
         if !header_line(input, &mut offset)?.is_empty() {
             return Err(invalid("only one advertised branch is supported"));
         }
-        if prerequisites.contains(&candidate) {
+        if !allow_prerequisite_tip && prerequisites.contains(&candidate) {
             return Err(invalid("candidate cannot also be a prerequisite"));
         }
         let pack = &input[offset..];
@@ -225,6 +234,24 @@ impl OneNode {
         }
         let envelope = CandidateEnvelope::parse_bounded(input, MAX_PREREQUISITES)?;
         envelope.bind(self.object_format, reference, expected_base, expected_candidate)?;
+        self.quarantine_bound_envelope_in(request, reference, expected_base, &envelope,
+            additional_visible_refs).await
+    }
+
+    // `expected_old` is the ref lease, not necessarily a pack prerequisite.
+    // They coincide for workspace/merge input but differ for rebase: the
+    // source ref is leased while onto is the bundle's prerequisite.
+    async fn quarantine_bound_envelope_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_old: GitOid,
+        envelope: &CandidateEnvelope<'_>,
+        additional_visible_refs: &[RefName],
+    ) -> Result<(BasisBoundValidatedReceive, ParseLimits), NodeWorkspaceRefusal> {
+        if !workspace_request_live(request) {
+            return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+        }
         let materialized = self.materialize_admission_in(request).await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
         if materialized.snapshot().hidden_refs.hides(reference.as_bytes())
@@ -263,7 +290,7 @@ impl OneNode {
             GitHashAlgorithm::Sha1 => GitObjectFormat::Sha1,
             GitHashAlgorithm::Sha256 => GitObjectFormat::Sha256,
         };
-        let mut command = format!("{expected_base} {expected_candidate} ").into_bytes();
+        let mut command = format!("{expected_old} {} ", envelope.candidate).into_bytes();
         command.extend_from_slice(reference.as_bytes());
         command.push(0);
         command.extend_from_slice(capabilities.as_bytes());
