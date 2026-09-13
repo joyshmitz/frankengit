@@ -1,62 +1,39 @@
-name: Native branch verification
+# Temporary transport for this native implementation session. The consumer is
+# the offline native rebase compiler/test run; remove after that run is retained.
+# No credentials, Git directory, mutable provider state or build results travel.
+name: Exact native development inputs
 on:
   push:
     branches: [main]
-    paths:
-      - .github/workflows/source-snapshot.yml
-      - crates/fgit-node/src/treefs_workspace/branches/**
-      - crates/fgit-node/src/treefs_workspace/branches.rs
-      - crates/fgit-cli/src/branches/**
-      - crates/fgit-cli/src/branches.rs
-      - crates/fgit-cli/tests/native_branch_smoke.rs
-      - scripts/e2e/branch_smoke.py
+    paths: [.github/workflows/source-snapshot.yml]
 permissions:
   contents: read
 jobs:
-  verify:
+  snapshot:
     runs-on: ubuntu-22.04
-    timeout-minutes: 25
-    env:
-      RCH_CARGO_WRAPPER_BYPASS: '1'
-      CARGO_BUILD_JOBS: '2'
-      CARGO_TARGET_DIR: /tmp/fg-branch-native
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Retain exact tracked input for native diagnostics
+      - name: Retain the exact compiler and locked public registry inputs
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/fg-source"
-          git rev-parse HEAD > "$RUNNER_TEMP/fg-source/revision.txt"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/fg-source/source.tar.gz" HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: native-source-${{ github.sha }}
-          path: ${{ runner.temp }}/fg-source
-          if-no-files-found: error
-          retention-days: 1
-      - name: Execute node and CLI including fresh-process branch coverage
-        shell: bash
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/fg-branch-evidence"
+          out="$RUNNER_TEMP/fg-native-input"
           mkdir -p "$out"
-          git rev-parse HEAD | tee "$out/revision.txt"
-          rustc -Vv | tee "$out/rustc.txt"
-          python3 -m py_compile scripts/e2e/branch_smoke.py
-          git diff --check
-          set +e
-          cargo test --locked -p fgit-node -p fgit-cli --all-targets --no-fail-fast -- --nocapture > "$out/test.log" 2>&1
-          code=$?
-          echo "$code" > "$out/test.exit"
-          tail -n 180 "$out/test.log"
-          exit "$code"
+          git rev-parse HEAD > "$out/revision.txt"
+          rustc -Vv > "$out/rustc.txt"
+          cargo fetch --locked
+          sysroot="$(rustc --print sysroot)"
+          tar -C "$sysroot" --exclude=share/doc -czf "$out/toolchain.tar.gz" .
+          tar -C "${CARGO_HOME:-$HOME/.cargo}" -czf "$out/registry.tar.gz" registry
+          git archive --format=tar.gz --output="$out/source.tar.gz" HEAD
+          (cd "$out" && sha256sum toolchain.tar.gz registry.tar.gz source.tar.gz > checksums.txt)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
         with:
-          name: branch-native-${{ github.sha }}
-          path: ${{ runner.temp }}/fg-branch-evidence
+          name: native-development-${{ github.sha }}
+          path: ${{ runner.temp }}/fg-native-input
           if-no-files-found: error
           retention-days: 1
+          compression-level: 0

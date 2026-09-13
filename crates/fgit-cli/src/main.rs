@@ -3,6 +3,7 @@
 mod branches;
 mod commit_replay;
 mod rebase;
+mod rebase_apply;
 mod issues;
 mod merge_apply;
 mod publication_support;
@@ -31,9 +32,19 @@ fn main() -> ExitCode {
         };
     }
     if arguments.first().is_some_and(|argument| argument == "rebase") {
-        return match rebase::run(&arguments[1..]) {
+        let result = if arguments.get(1).is_some_and(|argument| argument == "apply") {
+            rebase_apply::run(&arguments[2..])
+        } else if arguments[1..] == ["--help"] {
+            rebase::run(&arguments[1..]).and_then(|_| rebase_apply::run(&arguments[1..]))
+        } else {
+            rebase::run(&arguments[1..])
+        };
+        return match result {
             Ok(code) => ExitCode::from(code),
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("{{\"type\":\"rebase_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                ExitCode::from(2)
+            }
         };
     }
     if arguments.first().is_some_and(|argument| argument == "issue") {
